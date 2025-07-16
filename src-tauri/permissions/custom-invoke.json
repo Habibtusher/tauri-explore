@@ -1,0 +1,9 @@
+{
+  "identifier": "custom:invoke",
+  "description": "Allows invoking custom Rust commands",
+  "allow": [
+    {
+      "name": "invoke"
+    }
+  ]
+}
