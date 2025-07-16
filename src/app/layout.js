@@ -29,6 +29,7 @@ export default function RootLayout({ children }) {
           <div className="space-x-8">
             <Link href="/about" className="text-gray-600 hover:text-gray-900 transition">About</Link>
             <Link href="/contact" className="text-gray-600 hover:text-gray-900 transition">Contact</Link>
+            <Link href="/printers" className="text-gray-600 hover:text-gray-900 transition">Printers</Link>
           </div>
         </nav>
       </header>
