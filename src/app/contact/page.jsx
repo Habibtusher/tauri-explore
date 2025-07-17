@@ -7,23 +7,23 @@ const DevicesPage = () => {
     const [error, setError] = useState(null);
 
     useEffect(() => {
-        const fetchDevices = async () => {
-            // if (!window.__TAURI__) {
-            //     setError('Tauri API not available. Ensure the app is running with `yarn tauri dev`.');
-            //     return;
-            // }
-            try {
-                const devices = await invoke('list_devices');
-                console.log('Connected devices:', devices);
-                setDevices(devices);
-                setError(null);
-            } catch (error) {
-                console.error('Error fetching devices:', error);
-                setError(error.message || 'Failed to fetch devices');
-                setDevices([]);
-            }
-        };
-        fetchDevices();
+        // const fetchDevices = async () => {
+        //     if (!window.__TAURI__) {
+        //         setError('Tauri API not available. Ensure the app is running with `yarn tauri dev`.');
+        //         return;
+        //     }
+        //     try {
+        //         const devices = await invoke('List_devices');
+        //         console.log('Connected devices:', devices);
+        //         setDevices(devices);
+        //         setError(null);
+        //     } catch (error) {
+        //         console.error('Error fetching devices:', error);
+        //         setError(error.message || 'Failed to fetch devices');
+        //         setDevices([]);
+        //     }
+        // };
+        // fetchDevices();
     }, []);
 
     return (
