@@ -89,7 +89,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             process_text, 
             list_printers, 
-            List_all_printers, 
+            list_all_printers, 
 
         ])
         .run(tauri::generate_context!())

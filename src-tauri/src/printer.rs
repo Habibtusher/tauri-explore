@@ -1,3 +1,4 @@
+
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -9,7 +10,10 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-
+use snmp::{SyncSession, Value};
+use reqwest::blocking::Client;
+use scraper::Html;
+use scraper::Selector;
 #[derive(Deserialize)]
 struct Printer {
     Name: String,
@@ -28,10 +32,12 @@ pub struct NetworkPrinter {
     pub model: Option<String>,
     pub status: String,
 }
-#[tauri::command]
-pub fn List_all_printers() -> Result<Vec<NetworkPrinter>, String> {
-    let mut all_printers = Vec::new();
 
+
+#[tauri::command]
+pub fn list_all_printers() -> Result<Vec<NetworkPrinter>, String> {
+    let mut all_printers = Vec::new();
+    
     // Get locally installed printers first
     match List_local_printers() {
         Ok(local_printers) => {
@@ -47,7 +53,7 @@ pub fn List_all_printers() -> Result<Vec<NetworkPrinter>, String> {
         }
         Err(e) => eprintln!("Failed to get local printers: {}", e),
     }
-
+    
     // Discover network printers
     match discover_network_printers() {
         Ok(network_printers) => {
@@ -58,10 +64,117 @@ pub fn List_all_printers() -> Result<Vec<NetworkPrinter>, String> {
         }
         Err(e) => eprintln!("Failed to discover network printers: {}", e),
     }
-
+    
     Ok(all_printers)
 }
 
+pub fn query_printer_snmp(ip: &str) -> Option<(String, Option<String>)> {
+    // Validate IP address
+    if Ipv4Addr::from_str(ip).is_err() {
+        eprintln!("Invalid IP address: {}", ip);
+        return None;
+    }
+
+    let community = b"public";
+    let timeout = std::time::Duration::from_secs(1);
+    let target = format!("{}:161", ip);
+
+    // Attempt SNMP query
+    match SyncSession::new(&target, community, Some(timeout), 0) {
+        Ok(mut session) => {
+            // OIDs for printer name and model
+            let name_oid = &[1, 3, 6, 1, 2, 1, 1, 5, 0]; // sysName
+            let model_oids = [
+                &[1, 3, 6, 1, 2, 1, 25, 3, 2, 1, 3, 1], // hrDeviceDescr
+                &[1, 3, 6, 1, 2, 1, 43, 5, 1, 1, 16, 1], // prtGeneralPrinterName
+            ];
+
+            // Query printer name
+            let name = session.get(name_oid).ok().and_then(|pdu| {
+                pdu.varbinds.into_iter().next().and_then(|(_, val)| {
+                    if let Value::OctetString(bytes) = val {
+                        Some(String::from_utf8_lossy(&bytes).to_string())
+                    } else {
+                        None
+                    }
+                })
+            });
+
+            // Try multiple OIDs for model
+            let mut model = None;
+            for &oid in model_oids.iter() {
+                if let Ok(pdu) = session.get(oid) {
+                    model = pdu.varbinds.into_iter().next().and_then(|(_, val)| {
+                        if let Value::OctetString(bytes) = val {
+                            Some(String::from_utf8_lossy(&bytes).to_string())
+                        } else {
+                            None
+                        }
+                    });
+                    if model.is_some() {
+                        break;
+                    }
+                }
+            }
+
+            // Fallback to HTTP if model is not found
+            let model = model.or_else(|| query_printer_http(ip));
+
+            if let Some(name) = name {
+                return Some((name, model));
+            } else {
+                eprintln!("Failed to retrieve printer name via SNMP for IP: {}", ip);
+            }
+        }
+        Err(e) => {
+            eprintln!("SNMP session failed for IP {}: {}", ip, e);
+        }
+    }
+
+    // Final fallback to HTTP if SNMP fails entirely
+    query_printer_http(ip).map(|model| (model.clone(), Some(model)))
+}
+
+/// Fallback function to query printer information via HTTP.
+///
+/// Attempts to scrape the printer's web interface for model information.
+fn query_printer_http(ip: &str) -> Option<String> {
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .ok()?;
+    
+    let url = format!("http://{}", ip);
+    match client.get(&url).send() {
+        Ok(response) => {
+            if response.status().is_success() {
+                let body = response.text().ok()?;
+                let document = Html::parse_document(&body);
+                
+                // Try common selectors for printer model
+                let selectors = vec![
+                    Selector::parse("title").unwrap(),
+                    Selector::parse("h1").unwrap(),
+                    Selector::parse("meta[name='description']").unwrap(),
+                ];
+
+                for selector in selectors {
+                    if let Some(element) = document.select(&selector).next() {
+                        let text = element.text().collect::<Vec<_>>().join(" ");
+                        if !text.is_empty() {
+                            return Some(text);
+                        }
+                    }
+                }
+            }
+            None
+        }
+        Err(e) => {
+            eprintln!("HTTP query failed for IP {}: {}", ip, e);
+            None
+        }
+    }
+}
 pub fn List_local_printers() -> Result<Vec<String>, String> {
     // Try PowerShell first
     eprintln!("Attempting PowerShell Get-Printer command");
@@ -84,10 +197,7 @@ pub fn List_local_printers() -> Result<Vec<String>, String> {
                 .map_err(|e| format!("Failed to execute wmic command: {}", e))?;
 
             if !wmic_output.status.success() {
-                return Err(format!(
-                    "wmic command failed: {}",
-                    String::from_utf8_lossy(&wmic_output.stderr)
-                ));
+                return Err(format!("wmic command failed: {}", String::from_utf8_lossy(&wmic_output.stderr)));
             }
 
             let raw_output = String::from_utf8_lossy(&wmic_output.stdout);
@@ -106,10 +216,7 @@ pub fn List_local_printers() -> Result<Vec<String>, String> {
     };
 
     if !output.status.success() {
-        return Err(format!(
-            "PowerShell command failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        return Err(format!("PowerShell command failed: {}", String::from_utf8_lossy(&output.stderr)));
     }
 
     let raw_output = String::from_utf8_lossy(&output.stdout);
@@ -124,12 +231,7 @@ pub fn List_local_printers() -> Result<Vec<String>, String> {
         Ok(printers) => printers.into_iter().map(|p| p.Name).collect(),
         Err(_) => match serde_json::from_slice::<Printer>(&output.stdout) {
             Ok(printer) => vec![printer.Name],
-            Err(e) => {
-                return Err(format!(
-                    "Failed to parse JSON: {}. Raw output: {}",
-                    e, raw_output
-                ))
-            }
+            Err(e) => return Err(format!("Failed to parse JSON: {}. Raw output: {}", e, raw_output)),
         },
     };
 
@@ -146,31 +248,31 @@ pub fn discover_network_printers() -> Result<Vec<NetworkPrinter>, String> {
     } else {
         println!("discover_printers_net_view not Ok");
     }
-
+    
     // Method 2: Use PowerShell WMI to find network printers
     if let Ok(wmi_printers) = discover_printers_wmi() {
         network_printers.extend(wmi_printers);
-    } else {
+    }else {
         println!("discover_printers_wmi not Ok");
     }
-
+    
     // Method 3: Port scan common printer ports on local network
     if let Ok(scanned_printers) = discover_printers_port_scan() {
         network_printers.extend(scanned_printers);
-    } else {
+    }else {
         println!("discover_printers_port_scan not Ok");
     }
-
+    
     // Remove duplicates based on IP address
     let mut unique_printers = Vec::new();
     let mut seen_ips = HashSet::new();
-
+    
     for printer in network_printers {
         if seen_ips.insert(printer.ip_address.clone()) {
             unique_printers.push(printer);
         }
     }
-
+    
     Ok(unique_printers)
 }
 
@@ -179,12 +281,12 @@ pub fn discover_printers_net_view() -> Result<Vec<NetworkPrinter>, String> {
         .arg("view")
         .output()
         .map_err(|e| format!("Failed to execute net view: {}", e))?;
-
+    
     if !output.status.success() {
         println!("Printing scaner not sucess returning empty");
         return Ok(Vec::new());
     }
-
+    
     let raw_output = String::from_utf8_lossy(&output.stdout);
     let mut printers = Vec::new();
     println!("discover_printers_net_view{}", raw_output);
@@ -203,7 +305,7 @@ pub fn discover_printers_net_view() -> Result<Vec<NetworkPrinter>, String> {
             }
         }
     }
-
+    
     Ok(printers)
 }
 
@@ -214,30 +316,30 @@ pub fn discover_printers_wmi() -> Result<Vec<NetworkPrinter>, String> {
         .arg("Get-WmiObject -Class Win32_Printer | Where-Object {$_.Network -eq $true} | Select-Object Name, PortName, DriverName | ConvertTo-Json -Compress")
         .output()
         .map_err(|e| format!("Failed to execute PowerShell WMI: {}", e))?;
-
+    
     if !output.status.success() {
         println!("discover_printers_wmi not success return empty");
         return Ok(Vec::new());
     }
-
+    
     let raw_output = String::from_utf8_lossy(&output.stdout);
     if raw_output.trim().is_empty() {
         println!("Raw output is empty");
         return Ok(Vec::new());
     }
-
+    
     let mut printers = Vec::new();
     println!("discover_printers_wmi {}", raw_output);
     // Try to parse as array first, then as single object
     if let Ok(wmi_printers) = serde_json::from_str::<Vec<serde_json::Value>>(&raw_output) {
         for printer in wmi_printers {
-            if let (Some(name), Some(port_name)) =
-                (printer["Name"].as_str(), printer["PortName"].as_str())
-            {
+            if let (Some(name), Some(port_name)) = (
+                printer["Name"].as_str(),
+                printer["PortName"].as_str(),
+            ) {
                 printers.push(NetworkPrinter {
                     name: name.to_string(),
-                    ip_address: extract_ip_from_port(port_name)
-                        .unwrap_or_else(|| port_name.to_string()),
+                    ip_address: extract_ip_from_port(port_name).unwrap_or_else(|| port_name.to_string()),
                     port: 9100, // Default IPP port
                     model: printer["DriverName"].as_str().map(|s| s.to_string()),
                     status: "Network (WMI)".to_string(),
@@ -245,27 +347,27 @@ pub fn discover_printers_wmi() -> Result<Vec<NetworkPrinter>, String> {
             }
         }
     } else if let Ok(printer) = serde_json::from_str::<serde_json::Value>(&raw_output) {
-        if let (Some(name), Some(port_name)) =
-            (printer["Name"].as_str(), printer["PortName"].as_str())
-        {
+        if let (Some(name), Some(port_name)) = (
+            printer["Name"].as_str(),
+            printer["PortName"].as_str(),
+        ) {
             printers.push(NetworkPrinter {
                 name: name.to_string(),
-                ip_address: extract_ip_from_port(port_name)
-                    .unwrap_or_else(|| port_name.to_string()),
+                ip_address: extract_ip_from_port(port_name).unwrap_or_else(|| port_name.to_string()),
                 port: 9100,
                 model: printer["DriverName"].as_str().map(|s| s.to_string()),
                 status: "Network (WMI)".to_string(),
             });
         }
     }
-
+    
     Ok(printers)
 }
 
 pub fn discover_printers_port_scan() -> Result<Vec<NetworkPrinter>, String> {
     println!("discover_printers_port_scan call....");
     let network_range = get_local_network_range()?;
-    let common_ports = vec![9100, 515, 631, 9002, 2000, 6001]; // IPP, LPR, CUPS
+    let common_ports = vec![9100, 515, 631]; // IPP, LPR, CUPS
 
     let found_printers = Arc::new(Mutex::new(Vec::new()));
     let mut handles = Vec::new();
@@ -276,19 +378,23 @@ pub fn discover_printers_port_scan() -> Result<Vec<NetworkPrinter>, String> {
         for &ip in chunk {
             for &port in &common_ports {
                 let found_printers = Arc::clone(&found_printers);
+                let ip_clone = ip.clone();
                 let handle = thread::spawn(move || {
-                    if is_printer_port_open(ip, port) {
-                        println!("Port is open: IP: {} PORT: {}", ip, port);
+                    if is_printer_port_open(ip_clone, port) {
+                        let ip_str = ip_clone.to_string();
+                        println!("Port is open: IP: {} PORT: {}", ip_str, port);
+
+                        let (name, model) = query_printer_snmp(&ip_str)
+                            .unwrap_or_else(|| (format!("Network Printer at {}", ip_str), None));
+
                         let printer = NetworkPrinter {
-                            name: format!("Network Printer at {}", ip),
-                            ip_address: ip.to_string(),
+                            name,
+                            ip_address: ip_str,
                             port,
-                            model: None,
-                            status: "Discovered".to_string(),
+                            model,
+                            status: "Discovered (SNMP)".to_string(),
                         };
                         found_printers.lock().unwrap().push(printer);
-                    } else {
-                        // println!("Port is not open: {}", port);
                     }
                 });
                 handles.push(handle);
@@ -304,6 +410,7 @@ pub fn discover_printers_port_scan() -> Result<Vec<NetworkPrinter>, String> {
     let printers = found_printers.lock().unwrap().clone();
     Ok(printers)
 }
+
 
 pub fn extract_computer_name(line: &str) -> Option<String> {
     if let Some(start) = line.find("\\\\") {
@@ -321,9 +428,9 @@ pub fn resolve_hostname(hostname: &str) -> Result<String, String> {
         .arg(hostname)
         .output()
         .map_err(|e| format!("Failed to resolve hostname: {}", e))?;
-
+    
     let raw_output = String::from_utf8_lossy(&output.stdout);
-
+    
     for line in raw_output.lines() {
         if line.contains("Address:") && !line.contains("#") {
             if let Some(ip_start) = line.find("Address:") {
@@ -334,7 +441,7 @@ pub fn resolve_hostname(hostname: &str) -> Result<String, String> {
             }
         }
     }
-
+    
     Err("Could not resolve hostname".to_string())
 }
 
@@ -346,12 +453,12 @@ pub fn extract_ip_from_port(port_name: &str) -> Option<String> {
             return Some(ip_part.to_string());
         }
     }
-
+    
     // Try to parse the port name directly as an IP
     if Ipv4Addr::from_str(port_name).is_ok() {
         return Some(port_name.to_string());
     }
-
+    
     None
 }
 
@@ -359,11 +466,11 @@ pub fn get_local_network_range() -> Result<Vec<Ipv4Addr>, String> {
     let output = Command::new("ipconfig")
         .output()
         .map_err(|e| format!("Failed to get IP config: {}", e))?;
-
+    
     let raw_output = String::from_utf8_lossy(&output.stdout);
 
     println!("Network range output {}", raw_output);
-
+    
     let mut local_ip = None;
     for line in raw_output.lines() {
         if line.contains("IPv4 Address") {
@@ -379,16 +486,16 @@ pub fn get_local_network_range() -> Result<Vec<Ipv4Addr>, String> {
             }
         }
     }
-
+    
     if let Some(ip) = local_ip {
         let octets = ip.octets();
         let mut range = Vec::new();
-
+        
         // Generate network range (assuming /24 subnet)
         for i in 1..255 {
             range.push(Ipv4Addr::new(octets[0], octets[1], octets[2], i));
         }
-
+        
         Ok(range)
     } else {
         Err("Could not determine local IP address".to_string())
@@ -401,3 +508,5 @@ fn is_printer_port_open(ip: Ipv4Addr, port: u16) -> bool {
         Err(_) => false,
     }
 }
+
+

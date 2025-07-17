@@ -9,7 +9,7 @@ const Page = () => {
         const fetchPrinters = async () => {
             try {
                 const printers = await invoke('list_printers');
-                const printerList = await invoke('List_all_printers');
+                const printerList = await invoke('list_all_printers');
                 console.log('Connected printers list:', printerList);
                 setPrinters(printerList);
             } catch (error) {

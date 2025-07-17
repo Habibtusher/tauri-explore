@@ -11,11 +11,16 @@ edition = "2021"
 tauri-build = { version = "2.0", features = [] }
 
 [dependencies]
+reqwest = { version = "0.12.22", features = ["blocking"] }
+
 tauri = { version = "2.0", features = ["tray-icon", "image-ico", "image-png"] }
 tauri-plugin-shell = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.0", features = ["sync"] }
+snmp = "0.2.2"
+scraper = "0.23.1"
+ipp = "5.3.1"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
