@@ -9,7 +9,8 @@ const Page = () => {
         const fetchPrinters = async () => {
             try {
                 const printers = await invoke('list_printers');
-                console.log('Connected printers:', printers);
+                const printerList = await invoke('list_all_printers');
+                console.log('Connected printers list:', printerList);
                 setPrinters(printers);
             } catch (error) {
                 console.error('Error fetching printers:', error);

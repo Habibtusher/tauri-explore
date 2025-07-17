@@ -8,10 +8,10 @@ const DevicesPage = () => {
 
     useEffect(() => {
         const fetchDevices = async () => {
-            if (!window.__TAURI__) {
-                setError('Tauri API not available. Ensure the app is running with `yarn tauri dev`.');
-                return;
-            }
+            // if (!window.__TAURI__) {
+            //     setError('Tauri API not available. Ensure the app is running with `yarn tauri dev`.');
+            //     return;
+            // }
             try {
                 const devices = await invoke('list_devices');
                 console.log('Connected devices:', devices);
